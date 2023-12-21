@@ -9,6 +9,9 @@ from segment_anything.utils.transforms import ResizeLongestSide
 from tqdm import tqdm
 import argparse
 import traceback
+import cv2
+from skimage import io, segmentation, transform
+
 
 # visualization functions
 # source: https://github.com/facebookresearch/segment-anything/blob/main/notebooks/predictor_example.ipynb
@@ -54,7 +57,8 @@ def finetune_model_predict(img_np, box_np, sam_trans, sam_model_tune, device='cu
         
         sparse_embeddings, dense_embeddings = sam_model_tune.prompt_encoder(
             points=None,
-            boxes=box_torch,
+            # boxes=box_torch,
+            boxes=None,
             masks=None,
         )
         medsam_seg_prob, _ = sam_model_tune.mask_decoder(
@@ -73,12 +77,13 @@ def finetune_model_predict(img_np, box_np, sam_trans, sam_model_tune, device='cu
 #%% run inference
 # set up the parser
 parser = argparse.ArgumentParser(description='run inference on testing set based on MedSAM')
-parser.add_argument('-i', '--data_path', type=str, default='data/Test', help='path to the data folder')
-parser.add_argument('-o', '--seg_path_root', type=str, default='data/Test_MedSAMBaseSeg', help='path to the segmentation folder')
-parser.add_argument('--seg_png_path', type=str, default='data/sanity_test/Test_MedSAMBase_png', help='path to the segmentation folder')
+parser.add_argument('-i', '--data_path', type=str, default='/Road/deepGlobe/val_split/img', help='path to the data folder')
+parser.add_argument('-o', '--seg_path_root', type=str, default='/Road/deepGlobe/val_split/mask', help='path to the segmentation folder')
+parser.add_argument('--seg_png_path', type=str, default='data/val_results_test', help='path to the segmentation folder')
 parser.add_argument('--model_type', type=str, default='vit_b', help='model type')
 parser.add_argument('--device', type=str, default='cuda:0', help='device')
-parser.add_argument('-chk', '--checkpoint', type=str, default='work_dir/MedSAM/medsam_20230423_vit_b_0.0.1.pth', help='path to the trained model')
+# parser.add_argument('-chk', '--checkpoint', type=str, default='work_dir/SAM-ViT-B/sam_model_best.pth', help='path to the trained model')
+parser.add_argument('-chk', '--checkpoint', type=str, default='work_dir_test/SAM-ViT-B/sam_model_best.pth', help='path to the trained model')
 args = parser.parse_args()
 
 #% load MedSAM model
@@ -86,65 +91,103 @@ device = args.device
 sam_model_tune = sam_model_registry[args.model_type](checkpoint=args.checkpoint).to(device)
 sam_trans = ResizeLongestSide(sam_model_tune.image_encoder.img_size)
 
-npz_folders = sorted(os.listdir(args.data_path))
 os.makedirs(args.seg_png_path, exist_ok=True)
-for npz_folder in npz_folders:
-    npz_data_path = join(args.data_path, npz_folder)
-    save_path = join(args.seg_path_root, npz_folder)
-    if not os.path.exists(save_path):
-        os.makedirs(save_path, exist_ok=True)
-        npz_files = sorted(os.listdir(npz_data_path))
-        for npz_file in tqdm(npz_files):
-            try:
-                npz = np.load(join(npz_data_path, npz_file))
-                ori_imgs = npz['imgs']
-                ori_gts = npz['gts']
+sam_dice_scores = 0
+for file_name in tqdm(os.listdir(args.data_path)):
+    ori_imgs = cv2.imread(join(args.data_path, file_name))
+    ori_gts = cv2.imread(join(args.seg_path_root, file_name))
+    # get bounding box from mask
+    gt2D = ori_gts[:,:,0]
+    # 将gt resize到256*256
+    gt2D = transform.resize(
+        gt2D == 255,
+        (256, 256),
+        order=0,
+        preserve_range=True,
+        mode="constant",
+    )
+    ori_img = ori_imgs
+    # print(gt2D.shape)
+    # print(ori_img.shape)
+    y_indices, x_indices = np.where(gt2D > 0)
+    x_min, x_max = np.min(x_indices), np.max(x_indices)
+    y_min, y_max = np.min(y_indices), np.max(y_indices)
+    # add perturbation to bounding box coordinates
+    H, W = gt2D.shape
+    x_min = max(0, x_min - np.random.randint(0, 20))
+    x_max = min(W, x_max + np.random.randint(0, 20))
+    y_min = max(0, y_min - np.random.randint(0, 20))
+    y_max = min(H, y_max + np.random.randint(0, 20))
+    bbox = np.array([x_min, y_min, x_max, y_max])
+    seg_mask = finetune_model_predict(ori_img, bbox, sam_trans, sam_model_tune, device=device)
+    # print(np.unique(seg_mask))
+    seg_mask[seg_mask==1] = 255
+    seg_mask[seg_mask==0] = 0
+    cv2.imwrite(join(args.seg_png_path, file_name),seg_mask.astype(np.uint8))
+    sam_dice_scores += compute_dice(seg_mask>0, gt2D>0)
+sam_dice_scores /= len(os.listdir(args.data_path))
+print("sam_dice_scores:", str(sam_dice_scores))
 
-                sam_segs = []
-                sam_bboxes = []
-                sam_dice_scores = []
-                for img_id, ori_img in enumerate(ori_imgs):
-                    # get bounding box from mask
-                    gt2D = ori_gts[img_id]
-                    y_indices, x_indices = np.where(gt2D > 0)
-                    x_min, x_max = np.min(x_indices), np.max(x_indices)
-                    y_min, y_max = np.min(y_indices), np.max(y_indices)
-                    # add perturbation to bounding box coordinates
-                    H, W = gt2D.shape
-                    x_min = max(0, x_min - np.random.randint(0, 20))
-                    x_max = min(W, x_max + np.random.randint(0, 20))
-                    y_min = max(0, y_min - np.random.randint(0, 20))
-                    y_max = min(H, y_max + np.random.randint(0, 20))
-                    bbox = np.array([x_min, y_min, x_max, y_max])
-                    seg_mask = finetune_model_predict(ori_img, bbox, sam_trans, sam_model_tune, device=device)
-                    sam_segs.append(seg_mask)
-                    sam_bboxes.append(bbox)
-                    # these 2D dice scores are for debugging purpose. 
-                    # 3D dice scores should be computed for 3D images
-                    sam_dice_scores.append(compute_dice(seg_mask>0, gt2D>0))
+# npz_folders = sorted(os.listdir(args.data_path))
+# os.makedirs(args.seg_png_path, exist_ok=True)
+# for npz_folder in npz_folders:
+#     npz_data_path = join(args.data_path, npz_folder)
+#     save_path = join(args.seg_path_root, npz_folder)
+#     if not os.path.exists(save_path):
+#         os.makedirs(save_path, exist_ok=True)
+#         npz_files = sorted(os.listdir(npz_data_path))
+#         for npz_file in tqdm(npz_files):
+#             try:
+
+#                 npz = np.load(join(npz_data_path, npz_file))
+#                 ori_imgs = npz['imgs']
+#                 ori_gts = npz['gts']
+
+#                 sam_segs = []
+#                 sam_bboxes = []
+#                 sam_dice_scores = []
+#                 for img_id, ori_img in enumerate(ori_imgs):
+#                     # get bounding box from mask
+#                     gt2D = ori_gts[img_id]
+#                     y_indices, x_indices = np.where(gt2D > 0)
+#                     x_min, x_max = np.min(x_indices), np.max(x_indices)
+#                     y_min, y_max = np.min(y_indices), np.max(y_indices)
+#                     # add perturbation to bounding box coordinates
+#                     H, W = gt2D.shape
+#                     x_min = max(0, x_min - np.random.randint(0, 20))
+#                     x_max = min(W, x_max + np.random.randint(0, 20))
+#                     y_min = max(0, y_min - np.random.randint(0, 20))
+#                     y_max = min(H, y_max + np.random.randint(0, 20))
+#                     bbox = np.array([x_min, y_min, x_max, y_max])
+#                     seg_mask = finetune_model_predict(ori_img, bbox, sam_trans, sam_model_tune, device=device)
+#                     sam_segs.append(seg_mask)
+#                     sam_bboxes.append(bbox)
+#                     # these 2D dice scores are for debugging purpose. 
+#                     # 3D dice scores should be computed for 3D images
+#                     sam_dice_scores.append(compute_dice(seg_mask>0, gt2D>0))
                 
-                # save npz, including sam_segs, sam_bboxes, sam_dice_scores
-                np.savez_compressed(join(save_path, npz_file), medsam_segs=sam_segs, gts=ori_gts, sam_bboxes=sam_bboxes)
+#                 # save npz, including sam_segs, sam_bboxes, sam_dice_scores
+#                 np.savez_compressed(join(save_path, npz_file), medsam_segs=sam_segs, gts=ori_gts, sam_bboxes=sam_bboxes)
 
-                # visualize segmentation results
-                img_id = np.random.randint(0, len(ori_imgs))
-                # show ground truth and segmentation results in two subplots
-                fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-                axes[0].imshow(ori_imgs[img_id])
-                show_box(sam_bboxes[img_id], axes[0])
-                show_mask(ori_gts[img_id], axes[0])
-                axes[0].set_title('Ground Truth')
-                axes[0].axis('off')
+#                 # visualize segmentation results
+#                 img_id = np.random.randint(0, len(ori_imgs))
+#                 # show ground truth and segmentation results in two subplots
+#                 fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+#                 axes[0].imshow(ori_imgs[img_id])
+#                 show_box(sam_bboxes[img_id], axes[0])
+#                 show_mask(ori_gts[img_id], axes[0])
+#                 axes[0].set_title('Ground Truth')
+#                 axes[0].axis('off')
 
-                axes[1].imshow(ori_imgs[img_id])
-                show_box(sam_bboxes[img_id], axes[1])
-                show_mask(sam_segs[img_id], axes[1])
-                axes[1].set_title('MedSAM: DSC={:.3f}'.format(sam_dice_scores[img_id]))
-                axes[1].axis('off')
-                # save figure
-                fig.savefig(join(args.seg_png_path, npz_file.split('.npz')[0]+'.png'))
-                # close figure
-                plt.close(fig)
-            except Exception:
-                traceback.print_exc()
-                print('error in {}'.format(npz_file))
+#                 axes[1].imshow(ori_imgs[img_id])
+#                 show_box(sam_bboxes[img_id], axes[1])
+#                 show_mask(sam_segs[img_id], axes[1])
+#                 axes[1].set_title('MedSAM: DSC={:.3f}'.format(sam_dice_scores[img_id]))
+#                 axes[1].axis('off')
+#                 # save figure
+#                 fig.savefig(join(args.seg_png_path, npz_file.split('.npz')[0]+'.png'))
+#                 # close figure
+#                 plt.close(fig)
+#             except Exception:
+#                 traceback.print_exc()
+#                 print('error in {}'.format(npz_file))

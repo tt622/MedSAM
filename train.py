@@ -10,6 +10,7 @@ import monai
 from segment_anything import sam_model_registry
 from segment_anything.utils.transforms import ResizeLongestSide
 import argparse
+from torch import nn
 # set seeds
 torch.manual_seed(2023)
 np.random.seed(2023)
@@ -44,12 +45,12 @@ class NpyDataset(Dataset):
 
 # %% set up parser
 parser = argparse.ArgumentParser()
-parser.add_argument('-i', '--tr_npy_path', type=str, default='data/Tr_npy', help='path to training npy files; two subfolders: npy_gts and npy_embs')
+parser.add_argument('-i', '--tr_npy_path', type=str, default='data/Tr_npy_new', help='path to training npy files; two subfolders: npy_gts and npy_embs')
 parser.add_argument('--task_name', type=str, default='SAM-ViT-B')
 parser.add_argument('--model_type', type=str, default='vit_b')
 parser.add_argument('--checkpoint', type=str, default='work_dir/SAM/sam_vit_b_01ec64.pth')
 parser.add_argument('--device', type=str, default='cuda:0')
-parser.add_argument('--work_dir', type=str, default='./work_dir')
+parser.add_argument('--work_dir', type=str, default='work_dir_test')
 # train
 parser.add_argument('--num_epochs', type=int, default=1000)
 parser.add_argument('--batch_size', type=int, default=8)
@@ -65,9 +66,14 @@ os.makedirs(model_save_path, exist_ok=True)
 sam_model = sam_model_registry[args.model_type](checkpoint=args.checkpoint).to(device)
 sam_model.train()
 
+mylog = open(model_save_path+"/train.log",'w')
+
 # Set up the optimizer, hyperparameter tuning will improve performance here
 optimizer = torch.optim.Adam(sam_model.mask_decoder.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-seg_loss = monai.losses.DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
+# seg_loss = monai.losses.DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
+# mse_Loss=nn.MSELoss()
+bce_Loss = nn.BCELoss()
+m = nn.Sigmoid()
 # regress loss for IoU/DSC prediction; (ignored for simplicity but will definitely included in the near future)
 # regress_loss = torch.nn.MSELoss(reduction='mean')
 #%% train
@@ -75,7 +81,7 @@ num_epochs = args.num_epochs
 losses = []
 best_loss = 1e10
 train_dataset = NpyDataset(args.tr_npy_path)
-train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 for epoch in range(num_epochs):
     epoch_loss = 0
     # Just train on the first 20 examples
@@ -92,9 +98,11 @@ for epoch in range(num_epochs):
             
             sparse_embeddings, dense_embeddings = sam_model.prompt_encoder(
                 points=None,
-                boxes=box_torch,
+                # boxes=box_torch,
+                boxes=None,
                 masks=None,
             )
+            # print("image_embedding:" + str(image_embedding.shape))
         low_res_masks, iou_predictions = sam_model.mask_decoder(
             image_embeddings=image_embedding.to(device), # (B, 256, 64, 64)
             image_pe=sam_model.prompt_encoder.get_dense_pe(), # (1, 256, 64, 64)
@@ -102,8 +110,10 @@ for epoch in range(num_epochs):
             dense_prompt_embeddings=dense_embeddings, # (B, 256, 64, 64)
             multimask_output=False,
           )
-
-        loss = seg_loss(low_res_masks, gt2D.to(device))
+        # print(low_res_masks.shape)# (B, 1, 256, 256)
+        # loss = seg_loss(low_res_masks, gt2D.to(device))
+        # loss = mse_Loss(low_res_masks, gt2D.to(device).float())
+        loss = bce_Loss(m(low_res_masks), m(gt2D).to(device).float())
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -111,6 +121,7 @@ for epoch in range(num_epochs):
     epoch_loss /= step
     losses.append(epoch_loss)
     print(f'EPOCH: {epoch}, Loss: {epoch_loss}')
+    print(f'EPOCH: {epoch}, Loss: {epoch_loss}', file=mylog)
     # save the model checkpoint
     torch.save(sam_model.state_dict(), join(model_save_path, 'sam_model_latest.pth'))
     # save the best model
@@ -126,4 +137,6 @@ for epoch in range(num_epochs):
     # plt.show() # comment this line if you are running on a server
     plt.savefig(join(model_save_path, 'train_loss.png'))
     plt.close()
+print("Finish!", file=mylog)
+mylog.close()
 

@@ -20,14 +20,14 @@ parser.add_argument(
     "-i",
     "--img_path",
     type=str,
-    default="data/MedSAMDemo_2D/train/images",
+    default="/Road/deepGlobe/train_split/img",
     help="path to the images",
 )
 parser.add_argument(
     "-gt",
     "--gt_path",
     type=str,
-    default="data/MedSAMDemo_2D/train/labels",
+    default="/Road/deepGlobe/train_split/mask",
     help="path to the ground truth (gt)",
 )
 
@@ -51,7 +51,7 @@ parser.add_argument(
     default="demo2d",
     help="dataset name; used to name the final npz file, e.g., demo2d.npz",
 )
-parser.add_argument("--image_size", type=int, default=256, help="image size")
+parser.add_argument("--image_size", type=int, default=1024, help="image size")
 parser.add_argument(
     "--img_name_suffix", type=str, default=".png", help="image name suffix"
 )
