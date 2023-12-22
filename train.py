@@ -148,6 +148,7 @@ for epoch in range(num_epochs):
     # plt.show() # comment this line if you are running on a server
     plt.savefig(join(model_save_path, 'train_loss.png'))
     plt.close()
+    mylog.flush()
 print("Finish!", file=mylog)
 mylog.close()
 
