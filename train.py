@@ -54,7 +54,7 @@ class NpyDataset(Dataset):
 # %% set up parser
 parser = argparse.ArgumentParser()
 parser.add_argument('-i', '--data_root', type=str, default='/Road/deepGlobe/train_split', help='path to training npy files; two subfolders: img and mask')
-parser.add_argument('--task_name', type=str, default='SAM-B-deepglobe-BCELoss-noFreeze')
+parser.add_argument('--task_name', type=str, default='SAM-B-deepglobe-BCELoss-noFreeze-Adam1e-5')
 parser.add_argument('--model_type', type=str, default='vit_b')
 parser.add_argument('--checkpoint', type=str, default='work_dir/SAM/sam_vit_b_01ec64.pth')
 parser.add_argument('--device', type=str, default='cuda:0')
@@ -78,7 +78,7 @@ sam_model.train()
 mylog = open(model_save_path+"/train.log",'w')
 
 # Set up the optimizer, hyperparameter tuning will improve performance here
-optimizer = torch.optim.Adam(sam_model.mask_decoder.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+optimizer = torch.optim.Adam(sam_model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 # seg_loss = monai.losses.DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
 # mse_Loss=nn.MSELoss()
 bce_Loss = nn.BCELoss()
@@ -112,7 +112,6 @@ for epoch in range(num_epochs):
             )
         # do not freeze image encoder
         # model input: (1, 3, 1024, 1024)
-        # print(img.shape)
         image_embedding = sam_model.image_encoder(img)
         # print("image_embedding:" + str(image_embedding.shape))
         low_res_masks, iou_predictions = sam_model.mask_decoder(
